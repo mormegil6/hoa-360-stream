@@ -50,6 +50,24 @@ FILTER="${1:-}"
 # The rewrite runs as: text = <expr>, with `t` bound to the original text.
 # Keep each mutation MINIMAL and obviously wrong; a subtle one that the suite
 # legitimately cannot see teaches nothing.
+# Restore one mutated file. `git checkout -- path` FAILS for anything inside a
+# submodule: the superproject tracks only the gitlink, so the pathspec matches
+# nothing, and with the error swallowed the mutation stays on disk, the rebuild
+# below bakes it into the image, and every later entry stacks on top of it.
+# services/earshot/src has been a submodule since 2026-08-18, so all three
+# earshot entries hit this. Dispatch on which repository actually tracks it.
+restore_file() {
+    _rf_path="$1"
+    case "$_rf_path" in
+        services/earshot/src/*)
+            git -C services/earshot/src checkout -- "${_rf_path#services/earshot/src/}" 2>/dev/null || true
+            ;;
+        *)
+            git checkout -- "$_rf_path" 2>/dev/null || true
+            ;;
+    esac
+}
+
 ENTRIES=(
 "play|services/rtmp-ingest/nginx.conf.template@@t.replace('            deny play all;\n', '')|rtmp-ingest|./scripts/test-pipeline.sh|UNAUTHENTICATED PLAY SUCCEEDED"
 # Drops ONLY the length cap, leaving the character allowlist intact. The first
@@ -81,11 +99,21 @@ ENTRIES=(
 # THE central product claim: 16 channels arrive in their own slots. Swaps ch0
 # and ch1 in earshot's RTMP-path transcode, naming all sixteen outputs so the
 # other fourteen are untouched and the failure is an ORDER fault rather than
-# fourteen silent channels.
-"order|services/earshot/src/nginx-transcoder/nginx-no-ssl.conf@@t.replace('-c:a libopus', '-af \"pan=16c' + chr(124) + chr(124).join(['c0=c1','c1=c0','c2=c2','c3=c3','c4=c4','c5=c5','c6=c6','c7=c7','c8=c8','c9=c9','c10=c10','c11=c11','c12=c12','c13=c13','c14=c14','c15=c15']) + '\" -c:a libopus')|earshot|./scripts/test-pipeline.sh|channel order did NOT survive"
+# fourteen silent channels. -filter:a:0, not -af: since the keep-alive track
+# the line carries two audio streams, and an unscoped -af would also turn the
+# stereo silence into sixteen channels, breaking a second thing.
+"order|services/earshot/src/nginx-transcoder/nginx-no-ssl.conf@@t.replace('-c:a:0 libopus', '-filter:a:0 \"pan=16c' + chr(124) + chr(124).join(['c0=c1','c1=c0','c2=c2','c3=c3','c4=c4','c5=c5','c6=c6','c7=c7','c8=c8','c9=c9','c10=c10','c11=c11','c12=c12','c13=c13','c14=c14','c15=c15']) + '\" -c:a:0 libopus')|earshot|./scripts/test-pipeline.sh|channel order did NOT survive"
 
 # The codec policy the whole project is named for.
-"opus|services/earshot/src/nginx-transcoder/nginx-no-ssl.conf@@t.replace('-c:a libopus -mapping_family 255', '-c:a aac')|earshot|./scripts/test-pipeline.sh|manifest lacks Opus audio"
+"opus|services/earshot/src/nginx-transcoder/nginx-no-ssl.conf@@t.replace('-c:a:0 libopus -mapping_family:a:0 255', '-c:a:0 aac')|earshot|./scripts/test-pipeline.sh|manifest lacks Opus audio"
+
+# The keep-alive track that stops WebKit suspending a backgrounded player.
+# Widens it from stereo to 16 channels rather than swapping its codec: the
+# codec is container-dependent (Opus already, on the WebM opt-in), so a codec
+# swap is a no-op there and the harness would report a false NOT CAUGHT. The
+# channel count is asserted on every path, so this mutation bites on all of
+# them, and it breaks exactly the property the track exists for.
+"keepalive|services/earshot/src/nginx-transcoder/nginx-no-ssl.conf@@t.replace('-ac:a:1 2', '-ac:a:1 16')|earshot|./scripts/test-pipeline.sh|lacks the silent stereo keep-alive set"
 
 # A SECURITY property: with the arbiter down, a guest publish must be REFUSED,
 # and the assertion lives in test-guest-endpoint.sh. Aimed first at
@@ -123,7 +151,7 @@ fi
 RESTORE=()
 restore_all() {
     for f in "${RESTORE[@]}"; do
-        git checkout -- "$f" 2>/dev/null || true
+        restore_file "$f"
     done
     [ ${#RESTORE[@]} -gt 0 ] && echo "  [restored ${#RESTORE[@]} file(s); rebuilding to match]"
     for s in $(printf '%s\n' "${REBUILT[@]:-}" | sort -u); do
@@ -199,7 +227,7 @@ PY
     if [ "$applied" -ne 1 ]; then
         echo "  FAIL: could not apply the mutation (stale entry) - counted as a miss"
         MISS=$((MISS+1))
-        for pair in "${PAIRS[@]}"; do git checkout -- "${pair%%@@*}" 2>/dev/null || true; done
+        for pair in "${PAIRS[@]}"; do restore_file "${pair%%@@*}"; done
         continue
     fi
 
@@ -220,7 +248,7 @@ PY
     esac
 
     out=$($suite 2>&1); rc=$?
-    for pair in "${PAIRS[@]}"; do git checkout -- "${pair%%@@*}" 2>/dev/null || true; done
+    for pair in "${PAIRS[@]}"; do restore_file "${pair%%@@*}"; done
     for s in "${SVCS[@]}"; do
         docker compose build "$s" >/dev/null 2>&1 && docker compose up -d --no-deps "$s" >/dev/null 2>&1
     done

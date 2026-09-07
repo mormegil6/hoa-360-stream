@@ -89,7 +89,7 @@ The build compiles `earshot`'s nginx-rtmp and ffmpeg fork from source: minutes o
 
 <!-- Diagram source + generator: docs/architecture/ (edit architecture.mmd, run ./build.sh). -->
 
-**What your encoder sends, and what the box does with it.** Whichever route you use, the stream arrives as H.264 video and AAC audio, because that is what OBS can send. From the `earshot` service onward the audio is Opus and is never downmixed: the channel count that arrives is the channel count delivered, 16 for 3rd order (the canonical configuration, ACN/SN3D) and 4 for 1st.
+**What your encoder sends, and what the box does with it.** Whichever route you use, the stream arrives as H.264 video and AAC audio, because that is what OBS can send. From the `earshot` service onward the programme audio is Opus and is never downmixed: the channel count that arrives is the channel count delivered, 16 for 3rd order (the canonical configuration, ACN/SN3D) and 4 for 1st. Beside it the manifest carries one more audio set, a silent stereo keep-alive at 8 kb/s - not a downmix of anything, and not what the player renders. It is there because WebKit suspends a backgrounded video element that has no decodable audio track, and Safari drops the 16-channel Opus set as undecodable.
 
 Both SRT routes take the direct path by default: the tracks pass untouched to the `earshot` service, which combines them and converts to Opus in one operation, so audio is compressed once on the way in rather than twice. What differs is supervision: your **own** stream is authenticated by its passphrase and otherwise left alone, while a **guest** session is arbitrated by `telemetry` throughout - admitted into the single slot, counted, time-limited, and cut off when it must be - whichever transport carries it. `GUEST_SRT_DIRECT=0` reroutes guests through the legacy RTMP hop instead: their tracks are re-encoded to one 16-channel AAC stream and republished into the arbiter over RTMP - the older, blunter enforcement path, at the price of a second lossy compression.
 
@@ -214,7 +214,7 @@ Generation, packaging, the 360 test card and its projection check, captions, hea
 | Variable | Default | Purpose |
 |---|---|---|
 | `RTMP_OWNER_KEY` | none; **`scripts/setup.sh` generates one** | The security-relevant publish secret at rtmp-ingest. The stack refuses to start on the placeholder unless `ALLOW_DEFAULT_OWNER_KEY=1`. |
-| `FFMPEG_FLAGS` | the `docker-compose.yml` fallback | Video policy of the `earshot` transcode; audio is always 16-ch Opus. Check the effective value with `docker compose config \| grep FFMPEG_FLAGS`. |
+| `FFMPEG_FLAGS` | the `docker-compose.yml` fallback | Video policy of the `earshot` transcode; the programme audio is always 16-ch Opus, and the `-dash_segment_type` in this same value also picks the codec of the silent stereo keep-alive track: AAC when it is `mp4`, which is the default, and Opus when it is `webm`, which is the commented-out VP9 line in [`.env.example`](.env.example). Check the effective value with `docker compose config \| grep FFMPEG_FLAGS`. |
 | `DASH_NAME` | `hoast_demo` | Public manifest filename, served at `/dash/<DASH_NAME>.mpd`. |
 | `SRT_ENABLED` | `1` | SRT contribution ingest, the recommended route. It still admits nobody unless a passphrase matches. |
 | `GUEST_ENABLED` | `0` | The keyless guest test endpoint. Off means the `guest` application does not exist. |

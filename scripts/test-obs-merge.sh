@@ -112,7 +112,10 @@ trap restore EXIT
     --channels 16 >/dev/null 2>&1 \
     || fail "push through the ingest failed"
 
-# newest completed audio chunk + its init segment; earshot names audio stream1
+# newest completed audio chunk + its init segment. Stream 1 on purpose, not
+# "the audio": earshot writes two audio streams now, and stream 2 is the
+# silent stereo keep-alive, which decodes as silence and would be reported as
+# a channel-order fault.
 sleep 2
 # Glob the extension: the container follows the video codec (.m4s under the
 # committed -c:v copy + -dash_segment_type mp4 default, .webm under VP9).

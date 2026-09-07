@@ -263,6 +263,9 @@ t0=$(date +%s)
 while :; do
     # Glob the extension: the container follows the video codec (.m4s under the
     # committed -c:v copy + -dash_segment_type mp4 default, .webm under VP9).
+    # Stream 1 on purpose, not "the audio": earshot writes two audio streams
+    # now and stream 2 is the silent keep-alive, which check-tones.py would
+    # report as a channel-order fault.
     INIT=$(find output -maxdepth 1 -name 'init-stream1.*' ! -name '*.tmp' | head -1)
     # -newer "$SEGMARK": only chunks this session produced. Without it the poll
     # matches the demo loop's leftovers on its first iteration and the whole

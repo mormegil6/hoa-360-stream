@@ -7,10 +7,11 @@
 # rtmp-ingest's token auth into earshot, then asserts live DASH appears in
 # ./output/:
 #   - <stream>.mpd manifest: valid XML, 16-ch Opus audio
-#     (AudioChannelConfiguration value="16"), and the video codec that the
+#     (AudioChannelConfiguration value="16"), the silent stereo keep-alive
+#     set (AAC in fMP4, Opus on the WebM opt-in), and the video codec that the
 #     EFFECTIVE FFMPEG_FLAGS imply - read from docker compose, never assumed
 #   - chunk files within FIRST_SEGMENT_DEADLINE seconds of the push start
-#   - at least MIN_CHUNKS chunks per stream after the push completes
+#   - at least MIN_CHUNKS chunks per stream (all three) after the push completes
 #
 # The RTMP contribution leg is H.264 + 16-ch AAC by protocol necessity; the
 # earshot transcode (always 16-ch Opus; video per FFMPEG_FLAGS) is what this
@@ -379,15 +380,57 @@ else
 fi
 
 grep -q "$VIDEO_CODEC" "$mpd" || fail "manifest lacks expected video codec $VIDEO_CODEC"
-grep -q 'codecs="opus"' "$mpd" || fail "manifest lacks Opus audio"
+# Scoped to the AdaptationSet that also declares 16 channels: on the WebM
+# opt-in the keep-alive set is Opus too, so a bare grep for codecs="opus" is
+# satisfied by the silent stereo track even with the programme encode broken -
+# which is what the `opus` entry in scripts/verify-tests-can-fail.sh mutates.
+python3 - "$mpd" <<'PY' || fail "manifest lacks Opus audio"
+import re, sys
+blocks = open(sys.argv[1]).read().split('<AdaptationSet')[1:]
+sys.exit(0 if any('codecs="opus"' in b and
+                  re.search(r'AudioChannelConfiguration[^>]*value="16"', b)
+                  for b in blocks) else 1)
+PY
 grep -q 'AudioChannelConfiguration' "$mpd" || fail "manifest lacks AudioChannelConfiguration"
 grep -q 'value="16"' "$mpd" || fail "manifest does not advertise 16 audio channels"
 
+# ------------------------------------------------ keep-alive set ------------
+# The third AdaptationSet: silent stereo audio at 8 kb/s, there so WebKit does
+# not suspend a backgrounded player. Safari drops the 16-channel Opus set as
+# undecodable, which left the <video> element with no audio track at all, and
+# audio died about 2 s after the viewer switched Space or tab; the exec-line
+# comment in services/earshot/src/nginx-transcoder/nginx-no-ssl.conf carries
+# the measurements. The codec follows the container, decided by earshot's
+# entrypoint from the same FFMPEG_FLAGS this script read above: AAC in fMP4,
+# Opus everywhere else, because dashenc's per-stream "auto" typing would put an
+# AAC keep-alive in fMP4 beside a WebM video and Opus programme and split the
+# manifest across two containers (measured). MIRRORS the rule in earshot's
+# nginx-transcoder/entrypoint.sh, which is the source of truth: change both
+# together or this asserts a codec the encoder no longer emits. Asserted per
+# AdaptationSet block rather than by a bare grep for value="2", so an attribute
+# sitting in the wrong set cannot satisfy it.
+case " $FFMPEG_FLAGS " in
+    *" -dash_segment_type mp4 "*) KEEPALIVE_CODEC=mp4a.40.2 ;;
+    *)                            KEEPALIVE_CODEC=opus ;;
+esac
+python3 - "$mpd" "$KEEPALIVE_CODEC" <<'PY' || fail "manifest lacks the silent stereo keep-alive set (no AdaptationSet with codecs=\"$KEEPALIVE_CODEC\" and AudioChannelConfiguration value=\"2\")"
+import re, sys
+text = open(sys.argv[1]).read()
+blocks = text.split('<AdaptationSet')[1:]
+ok = any('codecs="%s"' % sys.argv[2] in b
+         and re.search(r'AudioChannelConfiguration[^>]*value="2"', b) for b in blocks)
+sys.exit(0 if ok else 1)
+PY
+log "keep-alive set present: codecs=\"$KEEPALIVE_CODEC\", 2 channels"
+
+# Stream indices follow the exec lines' -map order: 0 video, 1 the 16-ch Opus
+# programme, 2 the keep-alive.
 chunks_v=$(find "$OUTPUT_DIR" -maxdepth 1 -name 'chunk-stream0-*' -newer "$marker" | wc -l | tr -d ' ')
 chunks_a=$(find "$OUTPUT_DIR" -maxdepth 1 -name 'chunk-stream1-*' -newer "$marker" | wc -l | tr -d ' ')
-log "chunks written: stream0=$chunks_v stream1=$chunks_a"
-[ "$chunks_v" -ge "$MIN_CHUNKS" ] && [ "$chunks_a" -ge "$MIN_CHUNKS" ] || \
-    fail "expected at least $MIN_CHUNKS chunks per stream (got $chunks_v/$chunks_a)"
+chunks_k=$(find "$OUTPUT_DIR" -maxdepth 1 -name 'chunk-stream2-*' -newer "$marker" | wc -l | tr -d ' ')
+log "chunks written: stream0=$chunks_v stream1=$chunks_a stream2=$chunks_k"
+[ "$chunks_v" -ge "$MIN_CHUNKS" ] && [ "$chunks_a" -ge "$MIN_CHUNKS" ] && [ "$chunks_k" -ge "$MIN_CHUNKS" ] || \
+    fail "expected at least $MIN_CHUNKS chunks per stream (got $chunks_v/$chunks_a/$chunks_k)"
 
 # ------------------------------------------------ channel order -------------
 # This test has pushed a 200..1700 Hz ladder, one tone per channel, since it was
@@ -401,6 +444,8 @@ log "chunks written: stream0=$chunks_v stream1=$chunks_a"
 # H.264 passthrough default). Glob for it rather than naming one, so this check
 # does not silently stop finding it the next time the container changes - which
 # is exactly what it did when the passthrough path moved to fMP4.
+# Stream 1 on purpose, not "the audio": stream 2 is the silent keep-alive, and
+# decoding that here would report sixteen silent channels as an order fault.
 init_a=$(find "$OUTPUT_DIR" -maxdepth 1 -name 'init-stream1.*' ! -name '*.tmp' | head -1)
 chunk_a=$(find "$OUTPUT_DIR" -maxdepth 1 -name 'chunk-stream1-*' ! -name '*.tmp' -newer "$marker" \
           | sort | tail -2 | head -1)
@@ -530,4 +575,4 @@ if [ -n "$init_v" ] && [ -f "$init_v" ] && [ -n "$chunk_v" ]; then
     esac
 fi
 
-log "PASS: first segment after ${t_first}s (deadline ${FIRST_SEGMENT_DEADLINE}s), $chunks_v+$chunks_a chunks, 16-ch Opus + $VIDEO_CODEC manifest OK, channel order verified"
+log "PASS: first segment after ${t_first}s (deadline ${FIRST_SEGMENT_DEADLINE}s), $chunks_v+$chunks_a+$chunks_k chunks, 16-ch Opus + $VIDEO_CODEC + $KEEPALIVE_CODEC keep-alive manifest OK, channel order verified"
