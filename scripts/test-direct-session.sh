@@ -227,6 +227,17 @@ else
     bad ":9100 is not listening after the rejected connection"
 fi
 
+# All four, not just the one the squatter hit: the port carries the video codec
+# as well as the track count, and a listener that never armed fails only for the
+# codec nobody happened to push that day.
+missing=""
+for p in 9100 9101 9102 9103; do
+    docker exec "${PROJECT}-earshot-1" sh -c "netstat -tln 2>/dev/null | grep -q ':$p'" \
+        || missing="$missing $p"
+done
+[ -z "$missing" ] && ok "all four direct listeners are armed (9100-9103)" \
+                  || bad "direct listeners not armed:$missing"
+
 reset_slot >/dev/null
 printf '\n\033[1m%d passed, %d failed\033[0m\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1

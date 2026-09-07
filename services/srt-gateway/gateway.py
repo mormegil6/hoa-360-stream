@@ -152,7 +152,15 @@ _SECRET_RE    = re.compile(r"\b(gw|token)=[^&\s]+")   # scrub creds from logs
 # and only OWNER sessions then fall back to the legacy /rtmp/owner latch.
 SRT_DIRECT    = os.environ.get("SRT_DIRECT", "0") == "1"
 EARSHOT_HOST  = os.environ.get("EARSHOT_HOST", "earshot")
-DIRECT_PORTS  = {4: 9100, 1: 9101}      # by probed track count
+# (probed track count, probed video codec) -> earshot direct-DASH listener.
+# The video codec is part of the key because the listener's -tag:v cannot be
+# deferred to ffmpeg: the MP4 muxer rejects the codec tag copied in from
+# MPEG-TS, and the value that has to overwrite it differs per codec (avc1 for
+# H.264, hvc1 for H.265). Sending H.265 to an avc1 listener produces a muxer
+# refusal in a container log the pusher cannot read, which is why the pair is
+# resolved here, where a refusal can still be explained.
+DIRECT_PORTS  = {(4, "h264"): 9100, (1, "h264"): 9101,
+                 (4, "hevc"): 9102, (1, "hevc"): 9103}
 DIRECT_NOTIFY_S = 30                    # legacy /rtmp/owner latch re-notify
 DIRECT_BEAT_S   = 10                    # session-protocol beat; matches the
                                         # RTMP path's on_update cadence
@@ -211,7 +219,7 @@ def build_join_map():
 JOIN_MAP = None  # built once at startup when enabled
 
 
-def child_command(name, ip, tracks):
+def child_command(name, ip, tracks, vcodec="h264"):
     """One session = one ffmpeg: demux the caller's mpegts, put the audio into
     a NAMED layout the AAC encoder can write a PCE for, copy video, and publish
     FLV into rtmp-ingest. The gw secret + realip args are how telemetry
@@ -245,7 +253,7 @@ def child_command(name, ip, tracks):
         return ["ffmpeg", "-hide_banner", "-loglevel", "warning",
                 "-f", "mpegts", "-i", "pipe:0",
                 "-map", "0", "-c", "copy",
-                "-f", "mpegts", f"tcp://{EARSHOT_HOST}:{DIRECT_PORTS[tracks]}"]
+                "-f", "mpegts", f"tcp://{EARSHOT_HOST}:{DIRECT_PORTS[(tracks, vcodec)]}"]
     if MODE == "guest":
         target = f"{INGEST_URL}/{name}?realip={ip}&gw={GW_SECRET}"
     else:
@@ -267,6 +275,35 @@ def child_command(name, ip, tracks):
     cmd += ["-c:v", "copy", "-c:a", "aac", "-b:a", bitrate, "-ar", "48000",
             "-f", "flv", target]
     return cmd
+
+
+def probe_video_codec(head):
+    """Which video codec is in this mpegts head? An ffmpeg codec_name ('h264',
+    'hevc', ...), or '' when there is no video stream or it cannot be resolved
+    from these bytes.
+
+    A SEPARATE ffprobe pass rather than widening probe_audio_tracks: that one's
+    stream counting carries the mid-stream-join semantics documented above, and
+    a second read of an already buffered head costs nothing worth entangling
+    them for.
+
+    Note what is NOT reachable here. MPEG-TS has no stream type for VP9 or AV1,
+    so ffmpeg muxes them as private data and this returns '' (verified
+    2026-09-07: a VP9 mpegts probes as codec_type 'data', codec_name
+    'bin_data'). Those codecs cannot arrive over this leg at all, which is a
+    transport limit, not a policy one."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-f", "mpegts", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_name", "-of", "json", "-i", "pipe:0"],
+            input=head, capture_output=True, timeout=PROBE_TIMEOUT_S)
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+    try:
+        streams = json.loads(r.stdout.decode("utf-8", "ignore")).get("streams", [])
+    except ValueError:
+        return ""
+    return streams[0].get("codec_name", "") if streams else ""
 
 
 def probe_audio_tracks(head):
@@ -560,6 +597,36 @@ class Gateway:
                              f"unsupported audio layout ({tracks}x{channels})"))
             return None
 
+        # Video codec, same deal one layer down: it decides the listener port on
+        # the direct path and the muxer on the legacy one, so an unusable codec
+        # has to be refused HERE, the last place that can still say why. The
+        # listener has no route to telemetry, so a codec it cannot tag dies in a
+        # container log the pusher will never read - which is exactly how an
+        # H.265 push failed for a tester in September 2026.
+        #
+        # Refuse only on a POSITIVE identification. An empty probe means these
+        # bytes did not resolve a video stream, not that the stream is bad, and
+        # turning an unlucky probe into a refused session would be a worse bug
+        # than the one being fixed; fall back to the historical H.264 assumption
+        # and let the muxer be the judge, exactly as before.
+        probed_v = probe_video_codec(bytes(head))
+        vcodec = probed_v or "h264"
+        # H.265 needs the direct path: the legacy leg republishes over FLV,
+        # which has no HEVC stream type at all.
+        allowed = ("h264", "hevc") if SRT_DIRECT else ("h264",)
+        if probed_v and vcodec not in allowed:
+            # Named the way an encoder's UI names them, not the way ffmpeg does:
+            # this sentence is read by whoever is trying to push.
+            pretty = {"h264": "H.264", "hevc": "H.265"}
+            why = (f"unsupported video codec '{vcodec}'; this deployment "
+                   f"carries {' or '.join(pretty[c] for c in allowed)}")
+            log(f"reject {s['ip']} ({why})")
+            self._memoize(s["ip"])
+            self._notify_reject(why)
+            self.events.put(("force_teardown",
+                             f"unsupported video codec ({vcodec})"))
+            return None
+
         # The session can have been torn down while we were in ffprobe (the
         # caller dropping is the common way). Spawning then would leave an
         # ffmpeg the gateway no longer tracks, briefly publishing the buffered
@@ -582,7 +649,7 @@ class Gateway:
             if not self._session_claim(s, tracks):
                 return None
         try:
-            child = subprocess.Popen(child_command(s["name"], s["ip"], tracks),
+            child = subprocess.Popen(child_command(s["name"], s["ip"], tracks, vcodec),
                                      stdin=subprocess.PIPE,
                                      stderr=subprocess.PIPE, bufsize=0)
         except OSError as e:
@@ -609,8 +676,8 @@ class Gateway:
         if SRT_DIRECT:
             threading.Thread(target=self._direct_latch, args=(s,), daemon=True).start()
         log(f"session media: {s['name']} from {s['ip']} - {tracks} x {channels} ch "
-            f"({order} order, child pid {child.pid}"
-            f"{', DIRECT to earshot:' + str(DIRECT_PORTS[tracks]) if SRT_DIRECT else ''})")
+            f"({order} order, {vcodec} video, child pid {child.pid}"
+            f"{', DIRECT to earshot:' + str(DIRECT_PORTS[(tracks, vcodec)]) if SRT_DIRECT else ''})")
         return bytes(head)
 
     def _session_claim(self, s, tracks):

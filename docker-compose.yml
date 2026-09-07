@@ -56,8 +56,8 @@ services:
       # becomes a rotatable secret without moving the manifest URL. Validated
       # against [A-Za-z0-9_-]+ in the earshot entrypoint.
       - DASH_NAME=${DASH_NAME:-hoast_demo}
-      # SRT direct-DASH listeners (:9100 4x4, :9101 1x4; compose-internal, never
-      # published). The owner SRT gateway can feed raw mpegts here instead of
+      # SRT direct-DASH listeners (:9100 to :9103, one per audio shape and video
+      # codec: 4x4 or 1x4, H.264 or H.265; compose-internal, never published). The owner SRT gateway can feed raw mpegts here instead of
       # republishing over RTMP/FLV, which deletes a 16-ch AAC re-encode (the
       # encode alone measured 59 % of a core at 20 Mbps; total gateway child
       # CPU falls from ~90-130 % to ~28-42 %) and one lossy audio generation.

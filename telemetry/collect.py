@@ -1446,7 +1446,10 @@ def _fence_direct_writers():
     c = container_named(docker_ps(), "earshot")
     if not c:
         return
-    for port in (9100, 9101):
+    # Every listener earshot arms, or the fence leaves a writer standing. The
+    # set grew from two to four when the port started carrying the video codec
+    # as well as the track count (9100/9102 4x4, 9101/9103 1x4).
+    for port in (9100, 9101, 9102, 9103):
         sh(f'docker exec {c} pkill -9 -f "socat -u TCP-LISTEN:{port}"', t=8)
     print("fenced direct writers (listener sockets recycled)", flush=True)
 
