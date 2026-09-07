@@ -43,7 +43,7 @@ OVR_FILE="docker-compose.override.yml"
 # so this can never point at a tag with nothing behind it. set-version.sh
 # deliberately does NOT touch it, and says so, for that same reason: this file
 # previously claimed the opposite.
-PIN_TAG="v1.3.3"
+PIN_TAG="v1.3.4"
 OWNER_PORT=8891
 
 say()  { printf '%s\n' "$*"; }
