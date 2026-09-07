@@ -15,7 +15,7 @@ url: "https://bmroz.eu/projects/360-livestream/"
 license: "Apache-2.0"
 # Do not edit these two by hand: `./scripts/set-version.sh <version>` sets them together with telemetry/VERSION, which is what a running stack reports on /api/live, and the hygiene workflow fails a push where the two disagree or where a tag does not match them. Without a version a citation describes an unversioned snapshot, which for a toolchain paper is the difference between reproducible and not.
 # A -dev marker means the tree has moved past the release named by date-released and has not itself been released.
-version: "1.3.5"
+version: "1.3.6-dev"
 date-released: "2026-09-07"
 keywords:
   - "Higher-Order Ambisonics"
